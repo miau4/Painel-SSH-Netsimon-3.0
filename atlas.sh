@@ -201,6 +201,33 @@ for u in data:
                 {print}' "$USERDB" > "$USERDB.tmp" 2>/dev/null \
                 && mv "$USERDB.tmp" "$USERDB"
             echo "$login:$senha" | chpasswd &>/dev/null
+
+            # AUTO-CURA: usuários vindos de um sync antigo podem ter ficado
+            # gravados no usuarios.db sem nunca terem entrado no array
+            # "clients" do Xray (ex.: falha silenciosa de jq no primeiro
+            # sync, feito no boot antes do Xray subir). Sem essa checagem,
+            # esse usuário fica "órfão" para sempre, pois este branch nunca
+            # tocava no config.json. Aqui verificamos se o email já está
+            # presente e, se não estiver, injetamos usando o UUID já salvo.
+            if [ -f "$XRAY_CONF" ] && [ -n "$uuid_local" ]; then
+                local ja_existe
+                ja_existe=$(jq --arg u "$login" \
+                    '[.inbounds[] | select(.port == 443) | .settings.clients[]? | select(.email == $u)] | length' \
+                    "$XRAY_CONF" 2>/dev/null)
+                if [ "$ja_existe" = "0" ] || [ -z "$ja_existe" ]; then
+                    local tmp2; tmp2=$(mktemp)
+                    jq --arg u "$login" --arg id "$uuid_local" \
+                        '(.inbounds[] | select(.port == 443)).settings.clients += [{"id": $id, "email": $u}]' \
+                        "$XRAY_CONF" > "$tmp2" 2>/dev/null
+                    if jq . "$tmp2" >/dev/null 2>&1; then
+                        mv "$tmp2" "$XRAY_CONF"
+                        ((novos++))
+                    else
+                        rm -f "$tmp2"
+                        echo "[ATLAS] ERRO: falha ao curar cliente órfão '$login' no Xray" >&2
+                    fi
+                fi
+            fi
             ((atualizados++))
         else
             # Não existe localmente: cria usuário Linux + Xray + registro local
@@ -225,6 +252,7 @@ for u in data:
                     mv "$tmp" "$XRAY_CONF"
                 else
                     rm -f "$tmp"
+                    echo "[ATLAS] ERRO: falha ao injetar '$login' no Xray (config.json ausente/inválido no momento do sync)" >&2
                 fi
             fi
 
